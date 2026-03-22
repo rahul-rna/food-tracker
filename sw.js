@@ -1,11 +1,11 @@
 const CACHE_NAME = 'food-tracker-v1';
 const ASSETS = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/app.js',
-  '/firebase-config.js',
-  '/manifest.json',
+  '/food-tracker/',
+  '/food-tracker/index.html',
+  '/food-tracker/style.css',
+  '/food-tracker/app.js',
+  '/food-tracker/firebase-config.js',
+  '/food-tracker/manifest.json',
 ];
 
 // Install — cache app shell
