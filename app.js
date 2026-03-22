@@ -1,46 +1,147 @@
 (function () {
   'use strict';
 
-  // ── Storage helpers ──
+  // ── Storage keys ──
   const STORAGE_KEY = 'food_tracker_entries';
   const TARGETS_KEY = 'food_tracker_targets';
   const MY_FOODS_KEY = 'food_tracker_my_foods';
 
   const defaultTargets = { calories: 2000, protein: 150, carbs: 250, fat: 65, fiber: 30 };
 
-  function loadEntries() {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
-    catch { return []; }
+  // ── Firebase references (set after init) ──
+  let db = null;
+  let firebaseReady = false;
+
+  function initFirebase() {
+    try {
+      if (typeof firebaseConfig === 'undefined' || !firebaseConfig.apiKey || firebaseConfig.apiKey === 'YOUR_API_KEY') {
+        console.warn('Firebase not configured — running in local-only mode.');
+        setSyncStatus('local');
+        return;
+      }
+      firebase.initializeApp(firebaseConfig);
+      db = firebase.firestore();
+      // Enable offline persistence
+      db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+        if (err.code === 'failed-precondition') {
+          console.warn('Firestore persistence failed: multiple tabs open');
+        } else if (err.code === 'unimplemented') {
+          console.warn('Firestore persistence not available in this browser');
+        }
+      });
+      firebaseReady = true;
+      setSyncStatus('syncing');
+      // Start real-time listeners
+      listenEntries();
+      listenMyFoods();
+      listenTargets();
+    } catch (e) {
+      console.error('Firebase init error:', e);
+      setSyncStatus('local');
+    }
   }
 
-  function saveEntries(entries) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+  // ── Sync status indicator ──
+  function setSyncStatus(status) {
+    const el = document.getElementById('sync-status');
+    if (!el) return;
+    const labels = { synced: '● Synced', syncing: '◌ Syncing…', local: '○ Local only', error: '✕ Sync error' };
+    el.className = 'sync-status sync-' + status;
+    el.textContent = labels[status] || status;
   }
 
-  function loadTargets() {
-    try { return { ...defaultTargets, ...JSON.parse(localStorage.getItem(TARGETS_KEY)) }; }
-    catch { return { ...defaultTargets }; }
+  // ── LocalStorage helpers ──
+  function loadLocal(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key)) || fallback; }
+    catch { return fallback; }
+  }
+  function saveLocal(key, data) {
+    localStorage.setItem(key, JSON.stringify(data));
   }
 
-  function saveTargets(t) {
-    localStorage.setItem(TARGETS_KEY, JSON.stringify(t));
+  let entries = loadLocal(STORAGE_KEY, []);
+  let targets = { ...defaultTargets, ...loadLocal(TARGETS_KEY, {}) };
+  let myFoods = loadLocal(MY_FOODS_KEY, []);
+
+  // ── Firebase: entries real-time sync ──
+  function listenEntries() {
+    if (!db) return;
+    db.collection('entries').orderBy('date', 'desc').onSnapshot(snap => {
+      entries = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      saveLocal(STORAGE_KEY, entries);
+      setSyncStatus('synced');
+      refresh();
+    }, err => {
+      console.error('Entries listener error:', err);
+      setSyncStatus('error');
+    });
   }
 
-  // ── My Foods (custom saved foods) ──
-  function loadMyFoods() {
-    try { return JSON.parse(localStorage.getItem(MY_FOODS_KEY)) || []; }
-    catch { return []; }
+  function addEntryToFirebase(entry) {
+    if (!db) return;
+    const { id, ...data } = entry;
+    db.collection('entries').doc(id).set(data).catch(err => {
+      console.error('Error saving entry:', err);
+      setSyncStatus('error');
+    });
   }
 
-  function saveMyFoods(foods) {
-    localStorage.setItem(MY_FOODS_KEY, JSON.stringify(foods));
+  function deleteEntryFromFirebase(id) {
+    if (!db) return;
+    db.collection('entries').doc(id).delete().catch(err => {
+      console.error('Error deleting entry:', err);
+    });
   }
 
+  // ── Firebase: my foods real-time sync ──
+  function listenMyFoods() {
+    if (!db) return;
+    db.collection('myFoods').orderBy('_lastUsed', 'desc').onSnapshot(snap => {
+      myFoods = snap.docs.map(doc => ({ _id: doc.id, ...doc.data() }));
+      saveLocal(MY_FOODS_KEY, myFoods);
+    }, err => console.error('My Foods listener error:', err));
+  }
+
+  function saveMyFoodToFirebase(food) {
+    if (!db) return;
+    const key = food.name.toLowerCase().trim().replace(/[^a-z0-9]/g, '_');
+    db.collection('myFoods').doc(key).set(food).catch(err => {
+      console.error('Error saving my food:', err);
+    });
+  }
+
+  // ── Firebase: targets real-time sync ──
+  function listenTargets() {
+    if (!db) return;
+    db.collection('settings').doc('targets').onSnapshot(doc => {
+      if (doc.exists) {
+        targets = { ...defaultTargets, ...doc.data() };
+        saveLocal(TARGETS_KEY, targets);
+        refresh();
+      }
+    }, err => console.error('Targets listener error:', err));
+  }
+
+  function saveTargetsToFirebase(t) {
+    if (!db) return;
+    db.collection('settings').doc('targets').set(t).catch(err => {
+      console.error('Error saving targets:', err);
+    });
+  }
+
+  // ── Local-only storage helpers (used when Firebase is not configured) ──
+  function saveEntries() {
+    saveLocal(STORAGE_KEY, entries);
+  }
+
+  function saveTargetsLocal() {
+    saveLocal(TARGETS_KEY, targets);
+  }
+
+  // ── My Foods (local operations) ──
   function addToMyFoods(entry) {
-    const foods = loadMyFoods();
     const key = entry.name.toLowerCase().trim();
-    // Find existing by name — update it, otherwise add new
-    const idx = foods.findIndex(f => f.name.toLowerCase().trim() === key);
+    const idx = myFoods.findIndex(f => f.name.toLowerCase().trim() === key);
     const food = {
       name: entry.name,
       serving: entry.serving || '',
@@ -53,23 +154,21 @@
       _lastUsed: Date.now(),
     };
     if (idx >= 0) {
-      foods[idx] = food;
+      myFoods[idx] = food;
     } else {
-      foods.unshift(food);
+      myFoods.unshift(food);
     }
-    saveMyFoods(foods);
+    saveLocal(MY_FOODS_KEY, myFoods);
+    saveMyFoodToFirebase(food);
   }
 
   function searchMyFoods(query) {
     const q = query.toLowerCase();
-    return loadMyFoods()
+    return myFoods
       .filter(f => f.name.toLowerCase().includes(q))
       .sort((a, b) => (b._lastUsed || 0) - (a._lastUsed || 0))
       .slice(0, 6);
   }
-
-  let entries = loadEntries();
-  let targets = loadTargets();
 
   // ── Date helpers ──
   function localDateStr(d) {
@@ -315,7 +414,7 @@
   }
 
   // ── Quantity / serving scaling ──
-  let baseNutrition = null; // stores per-1x nutrition when a food is selected
+  let baseNutrition = null;
 
   const qtyInput = document.getElementById('quantity');
   const qtyMinus = document.getElementById('qty-minus');
@@ -329,7 +428,6 @@
     document.getElementById('carbs').value = Math.round(baseNutrition.carbs * qty * 10) / 10;
     document.getElementById('fat').value = Math.round(baseNutrition.fat * qty * 10) / 10;
     document.getElementById('fiber').value = Math.round(baseNutrition.fiber * qty * 10) / 10;
-    // Update serving display
     const base = baseNutrition.serving;
     if (qty === 1) {
       document.getElementById('serving-size').value = base;
@@ -352,7 +450,6 @@
 
   function selectFood(food) {
     foodInput.value = food.name;
-    // Store base nutrition for scaling
     baseNutrition = {
       calories: food.calories,
       protein: food.protein,
@@ -361,7 +458,6 @@
       fiber: food.fiber,
       serving: food.serving,
     };
-    // Reset quantity to 1 and fill fields
     qtyInput.value = 1;
     document.getElementById('calories').value = food.calories;
     document.getElementById('protein').value = food.protein;
@@ -377,7 +473,6 @@
   foodInput.addEventListener('input', () => {
     const q = foodInput.value.trim();
     document.getElementById('autofill-hint').textContent = 'type to search foods';
-    // Clear base nutrition when user types a new food
     baseNutrition = null;
     document.getElementById('serving-base').textContent = '';
     qtyInput.value = 1;
@@ -396,7 +491,6 @@
     if (q.length >= 3) {
       apiTimeout = setTimeout(async () => {
         const apiResults = await searchAPI(q);
-        // Re-check current input still matches
         if (foodInput.value.trim().toLowerCase().startsWith(q.toLowerCase())) {
           const curQ = foodInput.value.trim();
           const myR = searchMyFoods(curQ);
@@ -470,8 +564,9 @@
       notes: document.getElementById('notes').value.trim(),
     };
     entries.push(entry);
-    saveEntries(entries);
-    // Save to My Foods for future autocomplete (use base nutrition if available, else per-qty values)
+    saveEntries();
+    addEntryToFirebase(entry);
+    // Save to My Foods
     const qtyVal = Number(qtyInput.value) || 1;
     addToMyFoods({
       name: entry.name,
@@ -485,7 +580,6 @@
     e.target.reset();
     document.getElementById('entry-date').value = todayStr();
     document.getElementById('entry-time').value = nowTime();
-    // Reset quantity and base nutrition
     baseNutrition = null;
     qtyInput.value = 1;
     document.getElementById('serving-base').textContent = '';
@@ -496,7 +590,8 @@
   // ── Delete entry ──
   function deleteEntry(id) {
     entries = entries.filter(e => e.id !== id);
-    saveEntries(entries);
+    saveEntries();
+    deleteEntryFromFirebase(id);
     refresh();
   }
 
@@ -573,24 +668,20 @@
     document.getElementById('today-fat').textContent = totals.fat.toFixed(0) + 'g';
     document.getElementById('today-fiber').textContent = totals.fiber.toFixed(0) + 'g';
 
-    // Update targets display
     document.getElementById('cal-target').textContent = targets.calories;
     document.getElementById('protein-target').textContent = targets.protein;
     document.getElementById('carbs-target').textContent = targets.carbs;
     document.getElementById('fat-target').textContent = targets.fat;
     document.getElementById('fiber-target').textContent = targets.fiber;
 
-    // Progress bars
     setProgress('cal-progress', totals.calories, targets.calories);
     setProgress('protein-progress', totals.protein, targets.protein);
     setProgress('carbs-progress', totals.carbs, targets.carbs);
     setProgress('fat-progress', totals.fat, targets.fat);
     setProgress('fiber-progress', totals.fiber, targets.fiber);
 
-    // Donut
     drawDonut(totals);
 
-    // Today meal list
     const sorted = [...todayEntries].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
     const container = document.getElementById('today-entries-list');
     if (!sorted.length) {
@@ -708,7 +799,6 @@
     const cw = W - pad.left - pad.right;
     const ch = H - pad.top - pad.bottom;
 
-    // Grid lines
     ctx.strokeStyle = '#2e3348';
     ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
@@ -724,7 +814,6 @@
       ctx.fillText(label + (metric !== 'calories' ? 'g' : ''), pad.left - 8, y + 4);
     }
 
-    // Target line
     const targetY = pad.top + ch * (1 - target / maxVal);
     ctx.strokeStyle = '#6c5ce740';
     ctx.lineWidth = 2;
@@ -739,7 +828,6 @@
     ctx.textAlign = 'left';
     ctx.fillText('target: ' + target + unit, W - pad.right - 80, targetY - 6);
 
-    // Bars
     const barWidth = cw / 7 * 0.55;
     const gap = cw / 7;
 
@@ -756,7 +844,6 @@
       roundRect(ctx, x, y, barWidth, barH, 4);
       ctx.fill();
 
-      // Value on top
       if (val > 0) {
         ctx.fillStyle = '#e4e6f0';
         ctx.font = 'bold 11px -apple-system, sans-serif';
@@ -764,14 +851,12 @@
         ctx.fillText(Math.round(val), x + barWidth / 2, y - 6);
       }
 
-      // Day label
       ctx.fillStyle = '#8b8fa8';
       ctx.font = '11px -apple-system, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(dayName(dayData[i].date), x + barWidth / 2, H - pad.bottom + 16);
     });
 
-    // Weekly summary
     const daysWithData = values.filter(v => v > 0);
     const avg = daysWithData.length ? Math.round(daysWithData.reduce((s, v) => s + v, 0) / daysWithData.length) : 0;
     const totalWeek = values.reduce((s, v) => s + v, 0);
@@ -803,7 +888,6 @@
     const days = last7Days();
     const weekEntries = entries.filter(e => days.includes(e.date) && e.time);
 
-    // Group by 2-hour blocks
     const blocks = Array.from({ length: 12 }, (_, i) => ({
       label: `${String(i * 2).padStart(2, '0')}:00`,
       start: i * 2,
@@ -839,7 +923,6 @@
     const cw = W - pad.left - pad.right;
     const ch = H - pad.top - pad.bottom;
 
-    // Grid
     ctx.strokeStyle = '#2e3348';
     ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
@@ -854,7 +937,6 @@
       ctx.fillText(Math.round(maxVal - (maxVal / 4) * i), pad.left - 8, y + 4);
     }
 
-    // Bars
     const gap = cw / 12;
     const barW = gap * 0.6;
 
@@ -863,7 +945,6 @@
       const barH = (val / maxVal) * ch;
       const y = pad.top + ch - barH;
 
-      // Color by intensity
       const intensity = val / (maxVal * 0.8);
       const color = intensity > 0.7 ? '#e17055' : intensity > 0.4 ? '#fdcb6e' : '#00b894';
 
@@ -885,13 +966,12 @@
       ctx.fillText(blocks[i].label, x + barW / 2, H - pad.bottom + 16);
     });
 
-    // Insights
     const insightsEl = document.getElementById('timing-insights');
     const peakBlock = blocks[avgCals.indexOf(Math.max(...avgCals))];
     const totalAvg = avgCals.reduce((s, v) => s + v, 0);
-    const morningCals = avgCals.slice(3, 6).reduce((s, v) => s + v, 0); // 6-12
-    const afternoonCals = avgCals.slice(6, 9).reduce((s, v) => s + v, 0); // 12-18
-    const eveningCals = avgCals.slice(9, 12).reduce((s, v) => s + v, 0); // 18-24
+    const morningCals = avgCals.slice(3, 6).reduce((s, v) => s + v, 0);
+    const afternoonCals = avgCals.slice(6, 9).reduce((s, v) => s + v, 0);
+    const eveningCals = avgCals.slice(9, 12).reduce((s, v) => s + v, 0);
 
     let insights = [];
     if (totalAvg > 0) {
@@ -907,7 +987,6 @@
     }
     insightsEl.innerHTML = insights.map(i => `<p>${i}</p>`).join('');
 
-    // Meal averages
     const mealTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
     const mealCards = document.getElementById('meal-avg-cards');
     mealCards.innerHTML = mealTypes.map(meal => {
@@ -944,7 +1023,8 @@
     targets.carbs = Number(document.getElementById('set-carbs').value) || 250;
     targets.fat = Number(document.getElementById('set-fat').value) || 65;
     targets.fiber = Number(document.getElementById('set-fiber').value) || 30;
-    saveTargets(targets);
+    saveTargetsLocal();
+    saveTargetsToFirebase(targets);
     document.getElementById('settings-overlay').classList.add('hidden');
     refresh();
   });
@@ -957,12 +1037,13 @@
 
   // ── Refresh all views ──
   function refresh() {
-    entries = loadEntries();
     renderRecentEntries();
     renderToday();
     renderTrends();
     renderTiming();
   }
 
+  // ── Initialize ──
+  initFirebase();
   refresh();
 })();

@@ -33,12 +33,33 @@ body {
 
 header { margin-bottom: 20px; }
 
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
 h1 {
   font-size: 1.6rem;
   font-weight: 700;
-  margin-bottom: 12px;
+  margin-bottom: 0;
   color: var(--accent-light);
 }
+
+/* Sync status */
+.sync-status {
+  font-size: 0.7rem;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.sync-synced { color: var(--green); background: rgba(0, 184, 148, 0.12); }
+.sync-syncing { color: var(--orange); background: rgba(253, 203, 110, 0.12); }
+.sync-local { color: var(--text-dim); background: var(--surface); }
+.sync-error { color: var(--red); background: rgba(225, 112, 85, 0.12); }
 
 nav {
   display: flex;
